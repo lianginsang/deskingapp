@@ -75,7 +75,7 @@ function fmtPct(n) {
 
 const DEFAULT_INPUTS = {
   downPayment: 0, tradeAllowance: 0, tradePayoff: 0,
-  dealerAddendum: 0, term: 72, rate: 0, maxPayment: '',
+  dealerAddendum: 3580, term: 72, rate: 0, maxPayment: '',
 };
 
 function printDeals(deals, inputs, bookKey, colIdx) {
@@ -244,19 +244,19 @@ export default function App() {
   const needles = FILTER_ALIASES[needle] ?? (needle ? [needle] : []);
 
   const displayDeals = (() => {
-    if (!needles.length && yfrom === null && yto === null && !maxMileage) return rankedDeals.slice(0, 10);
+    if (!needles.length && yfrom === null && yto === null && !maxMileage) return rankedDeals.slice(0, 25);
     // mileage-only fast path
     if (!needles.length && yfrom === null && yto === null && maxMileage) {
       return rankedDeals.filter(d => {
         const odo = parseFloat(String(d.row[colIdx['ODOMETER']] ?? '').replace(/[^0-9.]/g, '')) || 0;
         return odo <= maxMileage;
-      }).slice(0, 10);
+      }).slice(0, 25);
     }
     // If only year filter, no text needed — still walk the list
     if (!needles.length) {
       const yResults = [];
       for (const deal of rankedDeals) {
-        if (yResults.length >= 10) break;
+        if (yResults.length >= 25) break;
         const yr = parseInt(String(deal.row[colIdx['YEAR']] ?? '')) || 0;
         if (yfrom !== null && yr < yfrom) continue;
         if (yto   !== null && yr > yto)   continue;
@@ -268,7 +268,7 @@ export default function App() {
     }
     const results = [];
     for (const deal of rankedDeals) {
-      if (results.length >= 10) break;
+      if (results.length >= 25) break;
       const fullRow = rawRows[deal.i];
       if (!fullRow) continue;
       // Year filter
