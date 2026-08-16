@@ -651,6 +651,22 @@
   letter-spacing: 0.02em;
 }
 
+.toyotaBtn {
+  width: 100%;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  padding: clamp(6px, 1vh, 9px) clamp(16px, 2.5vw, 28px);
+  cursor: pointer;
+  background: #111111;
+  color: var(--text-secondary);
+  font-size: clamp(11px, 1.1vw, 13px);
+  font-weight: 500;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+  margin-bottom: clamp(10px, 1.8vh, 18px);
+}
+.toyotaBtn:hover:not(:disabled) { border-color: var(--accent); background: rgba(212,168,67,0.04); color: var(--accent); }
+.toyotaBtn:disabled { opacity: 0.35; cursor: not-allowed; }
+
 .bubbleRow {
   display: flex;
   gap: clamp(8px, 1.2vw, 12px);

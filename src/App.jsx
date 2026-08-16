@@ -75,8 +75,13 @@ function fmtPct(n) {
 
 const DEFAULT_INPUTS = {
   downPayment: 0, tradeAllowance: 0, tradePayoff: 0,
-  dealerAddendum: 3580, term: 72, rate: 0, maxPayment: '',
+  dealerAddendum: 3580, term: 72, rate: 16, maxPayment: '',
 };
+
+// Testing-only shortcut: caches the most recent successful upload in
+// localStorage (no backend/database yet) so the "Toyota" button can
+// replay it instantly without re-uploading a sheet.
+const LAST_UPLOAD_KEY = 'gotEmDone_lastUpload';
 
 function printDeals(deals, inputs, bookKey, colIdx) {
   const bookLabel = bookKey === 'WHOLESALE / TRADE-IN' ? 'Wholesale' : 'Retail / MSRP';
@@ -152,10 +157,25 @@ export default function App() {
   const [bookKey, setBookKey]       = useState('WHOLESALE / TRADE-IN');
   const fileRef = useRef();
 
+  const [hasLastUpload, setHasLastUpload] = useState(() => {
+    try { return !!localStorage.getItem(LAST_UPLOAD_KEY); } catch { return false; }
+  });
+
   const colIdx = {};
   columns.forEach((c, i) => { colIdx[c] = i; });
 
-  const applyMapping = useCallback((map, headers, dataRows) => {
+  // Persist the most recent successful upload so it can be replayed later
+  // (testing shortcut for the Toyota button — see note near that button).
+  const saveLastUpload = useCallback((name, headers, dataRows, map) => {
+    try {
+      localStorage.setItem(LAST_UPLOAD_KEY, JSON.stringify({
+        fileName: name, rawHeaders: headers, rawRows: dataRows, fieldMap: map,
+      }));
+      setHasLastUpload(true);
+    } catch { /* localStorage unavailable — skip caching */ }
+  }, []);
+
+  const applyMapping = useCallback((map, headers, dataRows, name) => {
     const activeFields = FIELD_ALIASES.filter((f) => map[f.key] !== '');
     const resolvedCols = activeFields.map((f) => f.key);
     const resolvedRows = dataRows.map((row) =>
@@ -168,7 +188,8 @@ export default function App() {
     setRows(resolvedRows);
     setRawRows(dataRows);   // <-- store full original rows for filter
     setStage('results');
-  }, []);
+    if (name) saveLastUpload(name, headers, dataRows, map);
+  }, [saveLastUpload]);
 
   const parseFile = useCallback((file) => {
     if (!file) return;
@@ -196,12 +217,29 @@ export default function App() {
       setFieldMap(initialMap);
       setFileName(file.name);
       if (Object.values(initialMap).some((v) => v === '')) setStage('mapping');
-      else applyMapping(initialMap, headers, dataRows);
+      else applyMapping(initialMap, headers, dataRows, file.name);
     };
     reader.readAsArrayBuffer(file);
   }, [applyMapping]);
 
-  const confirmMapping = () => applyMapping(fieldMap, rawHeaders, rawRows);
+  const confirmMapping = () => applyMapping(fieldMap, rawHeaders, rawRows, fileName);
+
+  // Testing-only shortcut: replays the most recent saved upload instead of
+  // requiring a new file. There's no real "Toyota" filter here — it just
+  // reloads whatever sheet was last uploaded, so we can demo/test the
+  // results flow without re-uploading each time. Swap for a real filter
+  // (or a proper backend-backed upload history) once this moves past testing.
+  const loadLastUpload = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LAST_UPLOAD_KEY));
+      if (!saved) return;
+      setRawHeaders(saved.rawHeaders);
+      setRawRows(saved.rawRows);
+      setFieldMap(saved.fieldMap);
+      setFileName(saved.fileName);
+      applyMapping(saved.fieldMap, saved.rawHeaders, saved.rawRows, saved.fileName);
+    } catch { /* corrupt/missing cache — nothing to load */ }
+  };
   const onDragOver   = (e) => { e.preventDefault(); setDragging(true); };
   const onDragLeave  = () => setDragging(false);
   const onDrop       = (e) => { e.preventDefault(); setDragging(false); parseFile(e.dataTransfer.files[0]); };
@@ -324,6 +362,16 @@ export default function App() {
               </div>
             </div>
           </div>
+          {/* Testing-only shortcut button — see note on loadLastUpload() above. */}
+          <button
+            type="button"
+            className={styles.toyotaBtn}
+            onClick={loadLastUpload}
+            disabled={!hasLastUpload}
+            title={hasLastUpload ? 'Load the most recently uploaded sheet' : 'No prior upload saved yet'}
+          >
+            Toyota
+          </button>
           <div className={styles.bubbleRow}>
             {bubbles.map((b) => (
               <div className={styles.bubble} key={b.title}>
