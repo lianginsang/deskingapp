@@ -171,7 +171,9 @@ export default function App() {
       .then(({ error }) => { if (error) console.warn('Supabase save failed:', error.message); });
   }, []);
 
-  const applyMapping = useCallback((map, headers, dataRows, name) => {
+  // persist=false for the Toyota replay: it's just displaying data that's
+  // already saved, and shouldn't write it back out again.
+  const applyMapping = useCallback((map, headers, dataRows, name, persist = true) => {
     const activeFields = FIELD_ALIASES.filter((f) => map[f.key] !== '');
     const resolvedCols = activeFields.map((f) => f.key);
     const resolvedRows = dataRows.map((row) =>
@@ -184,7 +186,7 @@ export default function App() {
     setRows(resolvedRows);
     setRawRows(dataRows);   // <-- store full original rows for filter
     setStage('results');
-    if (name) saveLastUpload(name, headers, dataRows, map);
+    if (name && persist) saveLastUpload(name, headers, dataRows, map);
   }, [saveLastUpload]);
 
   const parseFile = useCallback((file) => {
@@ -248,7 +250,7 @@ export default function App() {
     setRawRows(saved.rawRows);
     setFieldMap(saved.fieldMap);
     setFileName(saved.fileName);
-    applyMapping(saved.fieldMap, saved.rawHeaders, saved.rawRows, saved.fileName);
+    applyMapping(saved.fieldMap, saved.rawHeaders, saved.rawRows, saved.fileName, false);
   };
   const onDragOver   = (e) => { e.preventDefault(); setDragging(true); };
   const onDragLeave  = () => setDragging(false);
