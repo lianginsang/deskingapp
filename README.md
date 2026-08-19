@@ -20,6 +20,20 @@ The app opens at `http://localhost:3000`.
 - **Hide/show columns** — toggle individual columns on/off with the pill buttons
 - **Pagination** — 50 rows per page
 - **Fully client-side** — no data leaves the browser
+- **"Toyota" replay button** — reloads the last uploaded sheet without re-uploading. It first checks this computer's `localStorage`; if that's empty (e.g. a different computer), it falls back to a snapshot bundled into the app at `src/data/lastUpload.json`.
+
+### Updating the shared "Toyota" default
+
+The bundled snapshot ships with the app, so it's the same on every computer that has this repo — no backend/account needed, but it means updating it is a manual step:
+
+```bash
+npm run bake-upload -- "/path/to/latest-sheet.xlsx"
+git add src/data/lastUpload.json
+git commit -m "Update baked upload"
+git push
+```
+
+Then `git pull` (and restart/rebuild) on any other computer to pick up the new default.
 
 ## Dependencies
 

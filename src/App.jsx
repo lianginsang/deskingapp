@@ -5,36 +5,9 @@ import {
   AlertTriangle, Check, TrendingUp, DollarSign, RotateCcw, Printer,
 } from 'lucide-react';
 import styles from './App.module.css';
-
-const FIELD_ALIASES = [
-  { key: 'VIN',                  aliases: ['vin', 'vehicle identification number'] },
-  { key: 'STOCK',                aliases: ['stock #', 'stk', 'stock number', 'stock'] },
-  { key: 'YEAR',                 aliases: ['yr', 'model year', 'year'] },
-  { key: 'MAKE',                 aliases: ['manufacturer', 'brand', 'make', 'vehicle'] },
-  { key: 'MODEL',                aliases: ['vehicle model', 'model', 'vehiclemodel'] },
-  { key: 'TRIM',                 aliases: ['series', 'trim level', 'edition', 'trim'] },
-  { key: 'COLOR',                aliases: ['ext color', 'exterior color', 'colour', 'color', 'col.', 'col'] },
-  { key: 'ODOMETER',             aliases: ['odo', 'mileage', 'miles', 'odometer'] },
-  { key: 'AGE',                  aliases: ['days', 'days in stock', 'lot age', 'age'] },
-  { key: 'PRICE',                aliases: ['asking price', 'list price', 'sale price', 'price', 'listing price', 'listed price'] },
-  { key: 'WHOLESALE / TRADE-IN', aliases: ['trade', 'trade-in value', 'wholesale', 'wholesale value', 'j.d. power trade in clean', 'j.d. power trade clean'] },
-  { key: 'RETAIL / MSRP',       aliases: ['retail value', 'msrp', 'market value', 'j.d. power retail clean', 'j.d. power retail in clean'] },
-];
-
-function normalizeHeader(str) {
-  return String(str).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
-}
-
-function matchAlias(rawHeader) {
-  const n = normalizeHeader(rawHeader);
-  for (const field of FIELD_ALIASES) {
-    if (field.key === n) return field.key;
-    for (const alias of field.aliases) {
-      if (normalizeHeader(alias) === n) return field.key;
-    }
-  }
-  return null;
-}
+import { FIELD_ALIASES, matchAlias } from './fieldAliases';
+import bundledLastUpload from './data/lastUpload.json';
+import { supabase } from './supabaseClient';
 
 const TAX_RATE = 0.075;
 const REG_FEE  = 250;
@@ -78,10 +51,16 @@ const DEFAULT_INPUTS = {
   dealerAddendum: 3580, term: 72, rate: 16, maxPayment: '',
 };
 
-// Testing-only shortcut: caches the most recent successful upload in
-// localStorage (no backend/database yet) so the "Toyota" button can
-// replay it instantly without re-uploading a sheet.
+// The "Toyota" button replays the most recent successful upload. Load order:
+//   1. Supabase (`last_upload` table, single row) — the real cross-computer
+//      source of truth; every computer that uploads writes here.
+//   2. This computer's localStorage — instant fallback if Supabase is
+//      unreachable (offline, etc).
+//   3. src/data/lastUpload.json — a snapshot baked into the app itself via
+//      `npm run bake-upload` (see scripts/bake-upload.js), for a completely
+//      fresh computer/browser with no network and no local cache.
 const LAST_UPLOAD_KEY = 'gotEmDone_lastUpload';
+const LAST_UPLOAD_ROW_ID = 1;
 
 function printDeals(deals, inputs, bookKey, colIdx) {
   const bookLabel = bookKey === 'WHOLESALE / TRADE-IN' ? 'Wholesale' : 'Retail / MSRP';
@@ -158,14 +137,17 @@ export default function App() {
   const fileRef = useRef();
 
   const [hasLastUpload, setHasLastUpload] = useState(() => {
+    if (bundledLastUpload?.rawRows?.length) return true;
     try { return !!localStorage.getItem(LAST_UPLOAD_KEY); } catch { return false; }
   });
+  const [isLoadingToyota, setIsLoadingToyota] = useState(false);
 
   const colIdx = {};
   columns.forEach((c, i) => { colIdx[c] = i; });
 
-  // Persist the most recent successful upload so it can be replayed later
-  // (testing shortcut for the Toyota button — see note near that button).
+  // Persist the most recent successful upload so the Toyota button can
+  // replay it — locally instantly, and via Supabase from any computer
+  // (see LAST_UPLOAD_KEY comment above).
   const saveLastUpload = useCallback((name, headers, dataRows, map) => {
     try {
       localStorage.setItem(LAST_UPLOAD_KEY, JSON.stringify({
@@ -173,6 +155,20 @@ export default function App() {
       }));
       setHasLastUpload(true);
     } catch { /* localStorage unavailable — skip caching */ }
+
+    // Fire-and-forget: don't block the results view on network latency, and
+    // don't fail the upload if Supabase is unreachable or unconfigured.
+    supabase
+      .from('last_upload')
+      .upsert({
+        id: LAST_UPLOAD_ROW_ID,
+        file_name: name,
+        raw_headers: headers,
+        raw_rows: dataRows,
+        field_map: map,
+        updated_at: new Date().toISOString(),
+      })
+      .then(({ error }) => { if (error) console.warn('Supabase save failed:', error.message); });
   }, []);
 
   const applyMapping = useCallback((map, headers, dataRows, name) => {
@@ -224,21 +220,35 @@ export default function App() {
 
   const confirmMapping = () => applyMapping(fieldMap, rawHeaders, rawRows, fileName);
 
-  // Testing-only shortcut: replays the most recent saved upload instead of
-  // requiring a new file. There's no real "Toyota" filter here — it just
-  // reloads whatever sheet was last uploaded, so we can demo/test the
-  // results flow without re-uploading each time. Swap for a real filter
-  // (or a proper backend-backed upload history) once this moves past testing.
-  const loadLastUpload = () => {
+  // Replays the last uploaded sheet instead of requiring a new file.
+  // Load order is described on LAST_UPLOAD_KEY above: Supabase, then this
+  // computer's localStorage, then the bundled snapshot.
+  const loadLastUpload = async () => {
+    setIsLoadingToyota(true);
+    let saved = null;
     try {
-      const saved = JSON.parse(localStorage.getItem(LAST_UPLOAD_KEY));
-      if (!saved) return;
-      setRawHeaders(saved.rawHeaders);
-      setRawRows(saved.rawRows);
-      setFieldMap(saved.fieldMap);
-      setFileName(saved.fileName);
-      applyMapping(saved.fieldMap, saved.rawHeaders, saved.rawRows, saved.fileName);
-    } catch { /* corrupt/missing cache — nothing to load */ }
+      const { data, error } = await supabase
+        .from('last_upload')
+        .select('file_name, raw_headers, raw_rows, field_map')
+        .eq('id', LAST_UPLOAD_ROW_ID)
+        .single();
+      if (!error && data) {
+        saved = { fileName: data.file_name, rawHeaders: data.raw_headers, rawRows: data.raw_rows, fieldMap: data.field_map };
+      }
+    } catch { /* network/Supabase unreachable — fall through to local cache */ }
+
+    if (!saved) {
+      try { saved = JSON.parse(localStorage.getItem(LAST_UPLOAD_KEY)); } catch { /* corrupt/missing cache */ }
+    }
+    if (!saved && bundledLastUpload?.rawRows?.length) saved = bundledLastUpload;
+
+    setIsLoadingToyota(false);
+    if (!saved) return;
+    setRawHeaders(saved.rawHeaders);
+    setRawRows(saved.rawRows);
+    setFieldMap(saved.fieldMap);
+    setFileName(saved.fileName);
+    applyMapping(saved.fieldMap, saved.rawHeaders, saved.rawRows, saved.fileName);
   };
   const onDragOver   = (e) => { e.preventDefault(); setDragging(true); };
   const onDragLeave  = () => setDragging(false);
@@ -362,15 +372,14 @@ export default function App() {
               </div>
             </div>
           </div>
-          {/* Testing-only shortcut button — see note on loadLastUpload() above. */}
           <button
             type="button"
             className={styles.toyotaBtn}
             onClick={loadLastUpload}
-            disabled={!hasLastUpload}
-            title={hasLastUpload ? 'Load the most recently uploaded sheet' : 'No prior upload saved yet'}
+            disabled={!hasLastUpload || isLoadingToyota}
+            title={hasLastUpload ? 'Load the last uploaded sheet' : 'No prior upload saved yet'}
           >
-            Toyota
+            {isLoadingToyota ? 'Loading…' : 'Toyota'}
           </button>
           <div className={styles.bubbleRow}>
             {bubbles.map((b) => (
