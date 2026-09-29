@@ -819,6 +819,14 @@
   flex-shrink: 0;
 }
 
+.uniDivider {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 2px 4px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
 .uniLabel {
   font-size: clamp(9px, 0.8vw, 11px);
   font-weight: 600;

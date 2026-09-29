@@ -12,6 +12,11 @@ import { supabase } from './supabaseClient';
 const TAX_RATE = 0.075;
 const REG_FEE  = 250;
 
+// Vehicles priced below this are placeholders, not real prices — stock we
+// haven't figured out how to price yet often sits in the sheet at $1. They'd
+// otherwise dominate the ranking with meaningless equity percentages.
+const MIN_PRICE = 1000;
+
 function calcPayment(amtFin, termMonths, annualRate) {
   if (!amtFin || amtFin <= 0 || !termMonths) return 0;
   const r = annualRate / 100 / 12;
@@ -37,6 +42,28 @@ function calcDeal(row, colIdx, inputs, bookKey) {
   return { price, book, amtFin, payment, equityPct, netTrade, tax };
 }
 
+// Credit scores worse than 679 (i.e. below 680) are treated as subprime:
+// cap the model year shown to this many years older than the current year,
+// regardless of what the Year filter above says.
+const CREDIT_SUBPRIME_CUTOFF = 680;
+const YEAR_CAP_OFFSET = 3;
+
+// Monthly payment can't exceed this fraction of the customer's stated
+// monthly income, when income is provided.
+const INCOME_PAYMENT_PCT = 0.20;
+
+function getCreditCapYear(creditScore) {
+  const n = creditScore !== '' && creditScore != null ? parseFloat(creditScore) : NaN;
+  if (isNaN(n) || n >= CREDIT_SUBPRIME_CUTOFF) return null;
+  return new Date().getFullYear() - YEAR_CAP_OFFSET;
+}
+
+function getIncomeCapPmt(income) {
+  const n = income !== '' && income != null ? parseFloat(income) : NaN;
+  if (isNaN(n) || n <= 0) return null;
+  return n * INCOME_PAYMENT_PCT;
+}
+
 function fmt$(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   return '$' + Math.round(n).toLocaleString();
@@ -49,7 +76,11 @@ function fmtPct(n) {
 const DEFAULT_INPUTS = {
   downPayment: 0, tradeAllowance: 0, tradePayoff: 0,
   dealerAddendum: 3580, term: 72, rate: 16, maxPayment: '',
+  customerIncome: '', creditScore: '',
 };
+
+// Inputs kept as raw strings so "blank" stays distinguishable from zero.
+const RAW_INPUT_KEYS = new Set(['maxPayment', 'customerIncome', 'creditScore']);
 
 // The "Toyota" button replays the most recent successful upload. Load order:
 //   1. Supabase (`last_upload` table, single row) — the real cross-computer
@@ -66,6 +97,8 @@ function printDeals(deals, inputs, bookKey, colIdx) {
   const bookLabel = bookKey === 'WHOLESALE / TRADE-IN' ? 'Wholesale' : 'Retail / MSRP';
   const date = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const netTrade = inputs.tradeAllowance - inputs.tradePayoff;
+  const creditCapYear = getCreditCapYear(inputs.creditScore);
+  const incomeCapPmt = getIncomeCapPmt(inputs.customerIncome);
   const tableRows = deals.map(({ row, price, book, otherBook, amtFin, payment, equityPct, tax }, rank) => {
     const get = (key) => { const i = colIdx[key]; return i !== undefined ? row[i] : ''; };
     const vehicle = [get('YEAR'), get('MAKE'), get('MODEL'), get('TRIM')].filter(Boolean).join(' ') || 'Unknown';
@@ -110,6 +143,10 @@ function printDeals(deals, inputs, bookKey, colIdx) {
     <span>Addendum: <strong>${fmt$(inputs.dealerAddendum)}</strong></span>
     <span>Term: <strong>${inputs.term} mo</strong></span>
     <span>Rate: <strong>${inputs.rate}%</strong></span>
+    ${inputs.customerIncome !== '' ? `<span>Income: <strong>${fmt$(parseFloat(inputs.customerIncome))}/mo</strong></span>` : ''}
+    ${inputs.creditScore !== '' ? `<span>Credit: <strong>${inputs.creditScore}</strong></span>` : ''}
+    ${creditCapYear !== null ? `<span>Year Cap: <strong>${creditCapYear} or older</strong></span>` : ''}
+    ${incomeCapPmt !== null ? `<span>Income Pmt Cap: <strong>${fmt$(incomeCapPmt)}/mo</strong></span>` : ''}
   </div>
   <table><thead><tr><th>#</th><th>Vehicle</th><th>Price</th><th>Tax+Reg</th><th>Wholesale</th><th>Retail</th><th>Amt Fin.</th><th>Payment</th><th>Equity%</th></tr></thead>
   <tbody>${tableRows}</tbody></table>
@@ -269,18 +306,28 @@ export default function App() {
     if (fileRef.current) fileRef.current.value = '';
   };
 
+  // ── Credit / income guardrails ────────────────────────────────────────────
+  // Subprime credit caps the newest model year shown; income caps the
+  // payment. Both apply on top of (never looser than) whatever the user
+  // typed into the Year and Max Pmt fields.
+  const creditCapYear = getCreditCapYear(inputs.creditScore);
+  const incomeCapPmt  = getIncomeCapPmt(inputs.customerIncome);
+  const userMaxPmt    = inputs.maxPayment !== '' ? parseFloat(inputs.maxPayment) : null;
+  const validUserMaxPmt = userMaxPmt !== null && !isNaN(userMaxPmt) ? userMaxPmt : null;
+  const pmtCaps = [validUserMaxPmt, incomeCapPmt].filter((v) => v !== null);
+  const effectiveMaxPmt = pmtCaps.length ? Math.min(...pmtCaps) : null;
+
   // ── Compute ranked deals (all valid, no slice yet) ───────────────────────────
   const otherBookKey = bookKey === 'WHOLESALE / TRADE-IN' ? 'RETAIL / MSRP' : 'WHOLESALE / TRADE-IN';
   const rankedDeals = (() => {
-    const maxPmt   = inputs.maxPayment !== '' ? parseFloat(inputs.maxPayment) : null;
     const hasBook  = colIdx[bookKey] !== undefined;
     const hasPrice = colIdx['PRICE'] !== undefined;
     if (!hasBook || !hasPrice) return [];
     return rows
       .map((row, i) => ({ row, i, ...calcDeal(row, colIdx, inputs, bookKey), otherBook: calcDeal(row, colIdx, inputs, otherBookKey).book }))
       .filter((d) => {
-        if (d.book <= 0 || d.price <= 0 || d.equityPct === null) return false;
-        if (maxPmt !== null && !isNaN(maxPmt) && d.payment > maxPmt) return false;
+        if (d.book <= 0 || d.price < MIN_PRICE || d.equityPct === null) return false;
+        if (effectiveMaxPmt !== null && d.payment > effectiveMaxPmt) return false;
         return true;
       })
       .sort((a, b) => a.equityPct - b.equityPct);
@@ -289,8 +336,12 @@ export default function App() {
   // ── Apply text filter AFTER ranking, walk until 10 matches ──────────────────
   // Parse "2020-2025" or "2022" into yfrom/yto
   const yearParts = yearRange.trim().split('-').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-  const yfrom = yearParts[0] ?? null;
-  const yto   = yearParts[1] ?? (yearParts.length === 1 ? yearParts[0] : null);
+  const yfrom   = yearParts[0] ?? null;
+  const rawYto  = yearParts[1] ?? (yearParts.length === 1 ? yearParts[0] : null);
+  // Subprime credit tightens (never loosens) the upper year bound.
+  const yto = creditCapYear !== null
+    ? (rawYto !== null ? Math.min(rawYto, creditCapYear) : creditCapYear)
+    : rawYto;
   const needle = filterText.trim().toLowerCase();
 
   // Alias expansion — each key also searches its paired terms
@@ -340,7 +391,7 @@ export default function App() {
     return results;
   })();
 
-  const hasMaxPmt = inputs.maxPayment !== '' && !isNaN(parseFloat(inputs.maxPayment));
+  const hasMaxPmt = effectiveMaxPmt !== null;
   const netTrade  = inputs.tradeAllowance - inputs.tradePayoff;
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -502,7 +553,7 @@ export default function App() {
                 placeholder={placeholder ?? '0'}
                 onChange={(e) => {
                   const v = e.target.value;
-                  setInput(key, key === 'maxPayment' ? v : (v === '' ? 0 : parseFloat(v) || 0));
+                  setInput(key, RAW_INPUT_KEYS.has(key) ? v : (v === '' ? 0 : parseFloat(v) || 0));
                   setIsLoading(true);
                   if (loadingTimer.current) clearTimeout(loadingTimer.current);
                   loadingTimer.current = setTimeout(() => setIsLoading(false), Math.random() * 2000 + 1000);
@@ -510,6 +561,25 @@ export default function App() {
               />
             </div>
           ))}
+
+          {/* Customer profile — captured for the deal sheet, not used in ranking */}
+          <div className={styles.uniDivider} aria-hidden="true" />
+          {[
+            { key: 'customerIncome', label: 'Income ($/mo)', placeholder: 'optional' },
+            { key: 'creditScore',    label: 'Credit Score',  placeholder: 'optional' },
+          ].map(({ key, label, placeholder }) => (
+            <div className={styles.uniField} key={key}>
+              <label className={styles.uniLabel}>{label}</label>
+              <input
+                className={styles.uniInput}
+                type="number"
+                value={inputs[key]}
+                placeholder={placeholder}
+                onChange={(e) => setInput(key, e.target.value)}
+              />
+            </div>
+          ))}
+          <div className={styles.uniDivider} aria-hidden="true" />
 
           {/* Year range */}
           <div className={styles.uniField}>
@@ -592,7 +662,13 @@ export default function App() {
           </h2>
           {hasMaxPmt && (
             <span className={styles.filterPill}>
-              <DollarSign size={11} />filtered ≤ {fmt$(parseFloat(inputs.maxPayment))}/mo
+              <DollarSign size={11} />filtered ≤ {fmt$(effectiveMaxPmt)}/mo
+              {incomeCapPmt !== null && effectiveMaxPmt === incomeCapPmt ? ' (20% of income)' : ''}
+            </span>
+          )}
+          {creditCapYear !== null && (
+            <span className={styles.filterPill}>
+              <AlertTriangle size={11} />capped to {creditCapYear} or older (credit)
             </span>
           )}
         </div>
@@ -612,7 +688,7 @@ export default function App() {
               {colIdx['PRICE'] === undefined || colIdx[bookKey] === undefined
                 ? 'Price or book value column not found in this sheet.'
                 : needle
-                  ? 'The matching rows may not have valid price or book values.'
+                  ? `The matching rows may not have valid book values, or are priced under ${fmt$(MIN_PRICE)}.`
                   : 'Try adjusting your inputs above.'}
             </p>
           </div>
